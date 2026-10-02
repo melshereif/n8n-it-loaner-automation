@@ -1,0 +1,12 @@
+{
+  "name": "n8n-it-loaner-automation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "n8n workflows that automate an IT loaner-device program: request, assignment, reminders and returns",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node --test tests/*.test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}

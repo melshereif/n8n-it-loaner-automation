@@ -1,0 +1,8 @@
+Asset Tag,Type,Model,Serial Number,Status,Loan ID,Assigned To,Due Date,Last Returned,Notes
+LN-MAC-01,Mac,MacBook Air 13 M3,DEMO0001,Available,,,,2026-09-12,
+LN-MAC-02,Mac,MacBook Air 13 M3,DEMO0002,Available,,,,2026-09-25,
+LN-MAC-03,Mac,MacBook Pro 14 M4,DEMO0003,Needs Repair,,,,2026-09-30,Cracked hinge
+LN-WIN-01,Windows,Dell Latitude 7450,DEMO0101,Available,,,,,
+LN-WIN-02,Windows,Lenovo ThinkPad T14,DEMO0102,Available,,,,2026-08-30,
+LN-CHR-01,Chromebook,HP Chromebook 14,DEMO0201,Available,,,,,
+LN-IPD-01,iPad,iPad 10th gen,DEMO0301,Available,,,,,

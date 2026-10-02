@@ -1,0 +1,559 @@
+{
+  "name": "IT Loaner - 3. Return",
+  "nodes": [
+    {
+      "id": "da1e4319-57d5-4bad-a2f9-0c5ab2ce0341",
+      "name": "Loaner return form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "formTitle": "Return a loaner device",
+        "formDescription": "Log a returned loaner. IT staff can fill this in at the desk when the device is handed back.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Your work email",
+              "fieldType": "email",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Loan ID or asset tag",
+              "requiredField": true,
+              "placeholder": "LN-20261002-7F3K or LN-MAC-01"
+            },
+            {
+              "fieldLabel": "Condition",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Good"
+                  },
+                  {
+                    "option": "Damaged"
+                  },
+                  {
+                    "option": "Missing accessories"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Notes",
+              "fieldType": "textarea"
+            }
+          ]
+        },
+        "responseMode": "onReceived",
+        "options": {
+          "path": "loaner-return",
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Thanks! The return has been logged and a confirmation email is on its way."
+            }
+          },
+          "appendAttribution": false
+        }
+      },
+      "webhookId": "93b65201-2bd9-4c79-a919-dd2307d8e617"
+    },
+    {
+      "id": "5c093e5e-52f9-4ed3-a074-d71d209cc19d",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// ===== EDIT THESE FOR YOUR TEAM =====\nconst SETTINGS = {\n  sheetUrl: 'PASTE_YOUR_GOOGLE_SHEET_URL_HERE',\n  itEmail: 'it-team@example.com',          // gets waitlist, conflict, overdue and repair alerts\n  teamName: 'IT Service Desk',             // email signature\n  pickupLocation: 'the IT desk',\n  requestFormUrl: 'https://YOUR-N8N-HOST/form/loaner-request',\n  returnFormUrl: 'https://YOUR-N8N-HOST/form/loaner-return',\n};\n// =====================================\nreturn $input.all().map((item) => ({ json: { ...item.json, settings: SETTINGS } }));"
+      }
+    },
+    {
+      "id": "31049d88-1c01-4e0c-ae78-0403f466bb5f",
+      "name": "Read loans",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "={{ $('Settings').first().json.settings.sheetUrl }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Loans"
+        },
+        "options": {}
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "9b83e738-80d9-4b22-a7a4-5819e869de41",
+      "name": "Match return",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Core decision logic for the loaner-device workflows.\n//\n// Every function here is pure (no I/O, no n8n globals) so it can be unit-tested with node:test.\n// scripts/build.mjs copies these functions verbatim into the n8n Code nodes, so the tested code\n// and the code that runs in n8n are the same code.\n//\n// Dates are handled as 'YYYY-MM-DD' strings in the workflow's timezone to avoid off-by-one bugs\n// from mixing local time and UTC.\n\nconst MAX_LOAN_DAYS = 14;\nconst DEVICE_TYPES = ['Mac', 'Windows', 'Chromebook', 'iPad'];\nconst EMAIL_RE = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\n\nfunction ymdToUtc(ymd) {\n  const [y, m, d] = ymd.split('-').map(Number);\n  return Date.UTC(y, m - 1, d);\n}\n\nfunction daysBetween(fromYmd, toYmd) {\n  return Math.round((ymdToUtc(toYmd) - ymdToUtc(fromYmd)) / 86400000);\n}\n\nfunction addDays(ymd, days) {\n  return new Date(ymdToUtc(ymd) + days * 86400000).toISOString().slice(0, 10);\n}\n\nfunction isYmd(s) {\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(String(s || ''))) return false;\n  return addDays(s, 0) === s; // rejects 2026-02-30 etc.\n}\n\n// Validate and normalize a loaner request coming from the n8n Form Trigger.\n// Returns { ok: true, request } or { ok: false, errors: [...] }.\nfunction validateRequest(raw, todayYmd) {\n  const errors = [];\n  const name = String(raw.name || '').trim();\n  const email = String(raw.email || '').trim().toLowerCase();\n  const deviceType = String(raw.deviceType || '').trim();\n  const startDate = String(raw.startDate || '').trim();\n  const days = Number(raw.days);\n  const reason = String(raw.reason || '').trim().slice(0, 500);\n\n  if (!name) errors.push('Name is required.');\n  if (!EMAIL_RE.test(email)) errors.push('A valid email is required.');\n  if (!DEVICE_TYPES.includes(deviceType)) errors.push(`Device type must be one of: ${DEVICE_TYPES.join(', ')}.`);\n  if (!isYmd(startDate)) errors.push('Start date must be a valid date.');\n  else if (startDate < todayYmd) errors.push('Start date cannot be in the past.');\n  else if (daysBetween(todayYmd, startDate) > 30) errors.push('Requests can be made up to 30 days ahead.');\n  if (!Number.isInteger(days) || days < 1 || days > MAX_LOAN_DAYS) errors.push(`Loan length must be 1-${MAX_LOAN_DAYS} days.`);\n\n  if (errors.length) return { ok: false, errors };\n  return {\n    ok: true,\n    request: { name, email, deviceType, startDate, days, dueDate: addDays(startDate, days), reason },\n  };\n}\n\n// Pick an available device of the requested type.\n// Fair rotation: the device that has been sitting idle longest goes out first, which spreads wear\n// across the fleet. Devices with no Last Returned date count as idle the longest.\nfunction pickDevice(inventory, deviceType) {\n  const candidates = inventory.filter(\n    (d) => String(d['Status']).trim() === 'Available' && String(d['Type']).trim() === deviceType,\n  );\n  if (!candidates.length) return null;\n  candidates.sort((a, b) => {\n    const ra = String(a['Last Returned'] || ''), rb = String(b['Last Returned'] || '');\n    if (ra !== rb) return ra < rb ? -1 : 1;\n    return String(a['Asset Tag']).localeCompare(String(b['Asset Tag']));\n  });\n  return candidates[0];\n}\n\n// Loan IDs look like LN-20261002-7F3K. Date prefix keeps them sortable; random suffix avoids\n// collisions when two requests arrive in the same second.\nfunction makeLoanId(todayYmd, rand = Math.random) {\n  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I to avoid misreading\n  let suffix = '';\n  for (let i = 0; i < 4; i++) suffix += alphabet[Math.floor(rand() * alphabet.length)];\n  return `LN-${todayYmd.replace(/-/g, '')}-${suffix}`;\n}\n\n// After writing \"Checked Out\" to the inventory row, the workflow re-reads that row.\n// If another request claimed the same device in between, the Loan ID won't match ours.\nfunction verifyClaim(rowAfterWrite, loanId) {\n  return String(rowAfterWrite['Loan ID'] || '').trim() === loanId\n    && String(rowAfterWrite['Status'] || '').trim() === 'Checked Out';\n}\n\n// Decide which reminder emails to send today.\n// Each loan gets at most ONE \"due soon\" reminder and at most ONE overdue notice per day, recorded\n// in the Loans sheet ('Due Soon Sent', 'Last Overdue Notice') so re-running the workflow the same\n// day sends nothing twice.\nfunction planReminders(loans, todayYmd) {\n  const actions = [];\n  for (const loan of loans) {\n    if (String(loan['Status']).trim() !== 'Active') continue;\n    const due = String(loan['Due Date'] || '').trim();\n    if (!isYmd(due)) continue;\n    const daysLeft = daysBetween(todayYmd, due);\n\n    if (daysLeft === 1 && !String(loan['Due Soon Sent'] || '').trim()) {\n      actions.push({ kind: 'due-soon', loanId: loan['Loan ID'], loan, daysLeft });\n    } else if (daysLeft < 0 && String(loan['Last Overdue Notice'] || '').trim() !== todayYmd) {\n      actions.push({ kind: 'overdue', loanId: loan['Loan ID'], loan, daysOverdue: -daysLeft });\n    }\n  }\n  return actions;\n}\n\n// Process a return submitted on the return form.\n// Matches on Loan ID or Asset Tag (people remember one or the other), only against Active loans.\nfunction processReturn(raw, loans, todayYmd) {\n  const key = String(raw.loanIdOrAssetTag || '').trim().toUpperCase();\n  const condition = String(raw.condition || '').trim();\n  if (!key) return { ok: false, error: 'Enter the Loan ID or the asset tag on the device.' };\n  if (!['Good', 'Damaged', 'Missing accessories'].includes(condition))\n    return { ok: false, error: 'Choose the device condition.' };\n\n  const loan = loans.find(\n    (l) => String(l['Status']).trim() === 'Active'\n      && (String(l['Loan ID']).toUpperCase() === key || String(l['Asset Tag']).toUpperCase() === key),\n  );\n  if (!loan) return { ok: false, error: `No active loan found for \"${key}\".` };\n\n  const needsRepair = condition !== 'Good';\n  const due = String(loan['Due Date'] || '');\n  return {\n    ok: true,\n    loanId: loan['Loan ID'],\n    assetTag: loan['Asset Tag'],\n    email: loan['Email'],\n    name: loan['Name'],\n    returnedOn: todayYmd,\n    daysLate: isYmd(due) ? Math.max(0, daysBetween(due, todayYmd)) : 0,\n    newDeviceStatus: needsRepair ? 'Needs Repair' : 'Available',\n    alertIT: needsRepair,\n    condition,\n    notes: String(raw.notes || '').trim().slice(0, 500),\n  };\n}\n\n// Plain-text emails. Kept here (not typed into n8n nodes) so wording is reviewed and tested in one place.\n// Returns { to, subject, body }.\nfunction buildEmail(kind, d, settings) {\n  const sign = `\\n\\n${settings.teamName}`;\n  switch (kind) {\n    case 'confirmed':\n      return {\n        to: d.email,\n        subject: `Loaner confirmed: ${d.assetTag} (${d.loanId})`,\n        body: `Hi ${d.name},\\n\\nYour ${d.deviceType} loaner is reserved.\\n\\n`\n          + `Device: ${d.assetTag}${d.model ? ` (${d.model})` : ''}\\nPick up: ${d.startDate} at ${settings.pickupLocation}\\n`\n          + `Return by: ${d.dueDate}\\nLoan ID: ${d.loanId}\\n\\n`\n          + `Keep this Loan ID. You'll need it (or the asset tag on the device) to return it: ${settings.returnFormUrl}${sign}`,\n      };\n    case 'waitlisted':\n      return {\n        to: d.email,\n        subject: `Loaner request received: no ${d.deviceType} available yet (${d.loanId})`,\n        body: `Hi ${d.name},\\n\\nAll ${d.deviceType} loaners are out right now. You're on the waitlist and IT has been notified.\\n`\n          + `We'll email you as soon as one is available.\\n\\nRequest ID: ${d.loanId}${sign}`,\n      };\n    case 'invalid':\n      return {\n        to: d.notifyTo,\n        subject: 'Loaner request: a few details need fixing',\n        body: `Hi,\\n\\nWe couldn't process your loaner request:\\n\\n- ${d.errors.join('\\n- ')}\\n\\n`\n          + `Please submit the form again: ${settings.requestFormUrl}${sign}`,\n      };\n    case 'conflict':\n      return {\n        to: d.email,\n        subject: `Loaner request received (${d.loanId})`,\n        body: `Hi ${d.name},\\n\\nWe got your request. Another request claimed the same device at the same moment, `\n          + `so IT will assign yours by hand and email you shortly.\\n\\nRequest ID: ${d.loanId}${sign}`,\n      };\n    case 'due-soon':\n      return {\n        to: d.loan['Email'],\n        subject: `Reminder: loaner ${d.loan['Asset Tag']} is due tomorrow`,\n        body: `Hi ${d.loan['Name']},\\n\\nFriendly reminder: loaner ${d.loan['Asset Tag']} is due back tomorrow (${d.loan['Due Date']}).\\n`\n          + `Return it to ${settings.pickupLocation} and log the return here: ${settings.returnFormUrl}\\n\\nLoan ID: ${d.loanId}${sign}`,\n      };\n    case 'overdue':\n      return {\n        to: d.loan['Email'],\n        subject: `Overdue: loaner ${d.loan['Asset Tag']} was due ${d.loan['Due Date']}`,\n        body: `Hi ${d.loan['Name']},\\n\\nLoaner ${d.loan['Asset Tag']} is ${d.daysOverdue} day${d.daysOverdue === 1 ? '' : 's'} overdue `\n          + `(due ${d.loan['Due Date']}). Please return it to ${settings.pickupLocation} as soon as possible, `\n          + `or reply to this email if you need more time.\\n\\nLoan ID: ${d.loanId}${sign}`,\n      };\n    case 'returned':\n      return {\n        to: d.email,\n        subject: `Loaner returned: ${d.assetTag} (${d.loanId})`,\n        body: `Hi ${d.name},\\n\\nThanks, we've logged the return of ${d.assetTag} on ${d.returnedOn}. Your loan is closed.`\n          + (d.alertIT ? `\\n\\nYou reported: ${d.condition}. IT will take a look.` : '') + sign,\n      };\n    case 'return-problem':\n      return {\n        to: d.notifyTo,\n        subject: 'Loaner return: we could not match your device',\n        body: `Hi,\\n\\n${d.error}\\n\\nPlease check the Loan ID in your confirmation email (or the asset tag sticker) and submit `\n          + `the return form again: ${settings.returnFormUrl}${sign}`,\n      };\n    default:\n      throw new Error(`Unknown email kind: ${kind}`);\n  }\n}\n\n// One summary email to IT instead of one email per problem.\nfunction buildItDigest(items, todayYmd) {\n  if (!items.length) return null;\n  const lines = items.map((i) => `- ${i.title}${i.detail ? `: ${i.detail}` : ''}`);\n  return { subject: `[Loaners] ${items.length} item${items.length === 1 ? '' : 's'} need attention (${todayYmd})`, body: lines.join('\\n') };\n}\n\n\nconst f = $('Settings').first().json;\nconst today = $now.toFormat('yyyy-MM-dd');\nconst r = processReturn({ loanIdOrAssetTag: f['Loan ID or asset tag'], condition: f['Condition'], notes: f['Notes'] },\n  $input.all().map((i) => i.json), today);\nconst typed = String(f['Your work email'] || '').trim().toLowerCase();\nconst notifyTo = EMAIL_RE.test(typed) ? typed : f.settings.itEmail;\nif (!r.ok) return [{ json: { ok: false, mail: buildEmail('return-problem', { notifyTo, error: r.error }, f.settings) } }];\nreturn [{ json: { ...r, mail: buildEmail('returned', r, f.settings),\n  itAlert: r.alertIT ? buildItDigest([{ title: `${r.assetTag} returned: ${r.condition}`, detail: `${r.name} <${r.email}>, loan ${r.loanId}${r.notes ? ' | notes: ' + r.notes : ''}` }], today) : null } }];"
+      }
+    },
+    {
+      "id": "08307154-75fe-4093-abf6-da7b6a18f453",
+      "name": "Matched?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5d0547a3-96e5-4657-a0d3-25144040f67a",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "6f4e2b28-12a7-403c-ab50-15311878d53d",
+      "name": "Email: could not match",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1200,
+        200
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Match return').first().json.mail.to }}",
+        "subject": "={{ $('Match return').first().json.mail.subject }}",
+        "emailType": "text",
+        "message": "={{ $('Match return').first().json.mail.body }}",
+        "options": {
+          "appendAttribution": false
+        }
+      }
+    },
+    {
+      "id": "7d6a223c-c2bd-4d43-a929-ecc274c5d445",
+      "name": "Update device status",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        0
+      ],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "={{ $('Settings').first().json.settings.sheetUrl }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Inventory"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Asset Tag": "={{ $('Match return').first().json.assetTag }}",
+            "Status": "={{ $('Match return').first().json.newDeviceStatus }}",
+            "Loan ID": "",
+            "Assigned To": "",
+            "Due Date": "",
+            "Last Returned": "={{ $('Match return').first().json.returnedOn }}"
+          },
+          "matchingColumns": [
+            "Asset Tag"
+          ],
+          "schema": [
+            {
+              "id": "Asset Tag",
+              "displayName": "Asset Tag",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Loan ID",
+              "displayName": "Loan ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Assigned To",
+              "displayName": "Assigned To",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Last Returned",
+              "displayName": "Last Returned",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      }
+    },
+    {
+      "id": "7fbc445c-1188-470c-afc2-aa1282ee70e7",
+      "name": "Close loan",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1680,
+        0
+      ],
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "={{ $('Settings').first().json.settings.sheetUrl }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Loans"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Loan ID": "={{ $('Match return').first().json.loanId }}",
+            "Status": "Returned",
+            "Returned On": "={{ $('Match return').first().json.returnedOn }}",
+            "Condition": "={{ $('Match return').first().json.condition }}",
+            "Days Late": "={{ $('Match return').first().json.daysLate }}",
+            "Return Notes": "={{ $('Match return').first().json.notes }}"
+          },
+          "matchingColumns": [
+            "Loan ID"
+          ],
+          "schema": [
+            {
+              "id": "Loan ID",
+              "displayName": "Loan ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Returned On",
+              "displayName": "Returned On",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Condition",
+              "displayName": "Condition",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Days Late",
+              "displayName": "Days Late",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Return Notes",
+              "displayName": "Return Notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      }
+    },
+    {
+      "id": "37a603a3-6f86-4550-a85e-fd21b555cc3a",
+      "name": "Email: return confirmed",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1920,
+        0
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Match return').first().json.mail.to }}",
+        "subject": "={{ $('Match return').first().json.mail.subject }}",
+        "emailType": "text",
+        "message": "={{ $('Match return').first().json.mail.body }}",
+        "options": {
+          "appendAttribution": false
+        }
+      }
+    },
+    {
+      "id": "a0cd403e-74d0-4026-ab9c-ec8551a45fe6",
+      "name": "Needs repair?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2160,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "2358ca63-af3a-4d27-a88c-fe271d983ff6",
+              "leftValue": "={{ $('Match return').first().json.alertIT }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "356e90d4-0fb7-4161-ae90-27bb86eceac5",
+      "name": "Alert IT: repair",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2400,
+        0
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Settings').first().json.settings.itEmail }}",
+        "subject": "={{ $('Match return').first().json.itAlert.subject }}",
+        "emailType": "text",
+        "message": "={{ $('Match return').first().json.itAlert.body }}",
+        "options": {
+          "appendAttribution": false
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Loaner return form": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Read loans",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read loans": {
+      "main": [
+        [
+          {
+            "node": "Match return",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match return": {
+      "main": [
+        [
+          {
+            "node": "Matched?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matched?": {
+      "main": [
+        [
+          {
+            "node": "Update device status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Email: could not match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update device status": {
+      "main": [
+        [
+          {
+            "node": "Close loan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Close loan": {
+      "main": [
+        [
+          {
+            "node": "Email: return confirmed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email: return confirmed": {
+      "main": [
+        [
+          {
+            "node": "Needs repair?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs repair?": {
+      "main": [
+        [
+          {
+            "node": "Alert IT: repair",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York",
+    "saveManualExecutions": true
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
